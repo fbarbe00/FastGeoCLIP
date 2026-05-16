@@ -1,7 +1,21 @@
-torch
+# Web framework and server
+fastapi
+uvicorn
+python-multipart
+
+# ML and model inference (CPU-only)
+torch>=2.4.0
 torchvision
-Pillow
 transformers
-pandas
-numpy
-geopy
+
+# Image processing
+Pillow
+
+# Data processing
+numpy<2
+
+# Vector search
+faiss-cpu
+
+geopandas
+shapely

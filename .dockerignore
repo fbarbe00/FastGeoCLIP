@@ -1,0 +1,21 @@
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Host-prepared, mounted at runtime — don't bake into image
+clip/
+data/
+
+# Cache files — generated at first startup
+fastgeoclip/gps_gallery/*.pth
+fastgeoclip/gps_gallery/*.faiss
+
+# Repo metadata
+README.md
+NOTICE.md
+ORIGINAL_README.md
+RELEASE_TODO.md
+docker-compose.example.yml

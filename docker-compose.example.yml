@@ -1,0 +1,25 @@
+# Minimal stand-alone docker-compose for FastGeoCLIP.
+# Drop into the project root and run: docker compose up --build
+services:
+  fastgeoclip:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - NUM_THREADS=4
+      - K_NEIGHBORS=1000
+      - FAISS_INDEX_TYPE=flatl2      # flatl2 | ivf | hnsw — flatl2 is exact, fine at 100K
+      - MAX_UPLOAD_MB=25
+      - CACHE_DIR=/app/cache
+    volumes:
+      - ./clip:/app/clip:ro      # CLIP vision tower (see reduce_clip_size.py)
+      - ./data:/app/data:ro      # admin1_clean.gpkg for /lookup
+      - fgc_cache:/app/cache     # FAISS index + embeddings cache (generated)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  fgc_cache:

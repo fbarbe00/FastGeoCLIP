@@ -1,101 +1,198 @@
-<div align="center">    
- 
-# 🌎 GeoCLIP: Clip-Inspired Alignment between Locations and Images for Effective Worldwide Geo-localization
+# FastGeoCLIP
 
-[![Paper](http://img.shields.io/badge/paper-arxiv.2309.16020-B31B1B.svg)](https://arxiv.org/abs/2309.16020v2)
-[![Conference](https://img.shields.io/badge/NeurIPS-2023-blue)]()
+A CPU-optimized fork of [GeoCLIP](https://github.com/VicenteVivan/geo-clip) (Vicente Vivanco, NeurIPS 2023), for low-latency image-to-GPS prediction. **Roughly 10× faster than the upstream library on the same CPU and image**, with no accuracy loss vs. the upstream model. Also includes a FastAPI server for querying, and batch predictions.
 
-![ALT TEXT](/figures/GeoCLIP.png)
+The original version embedded location after each run, and did some linearly compared each embedding with the location embeddings. This version gets the CLIP checkpoint with a vision-only variant loaded from local disk, pre-computes and caches the GPS gallery embeddings, and uses FAISS to narrow the candidate pool before exact scoring.
 
-</div>
+See [NOTICE.md](NOTICE.md) for a detailed list of changes vs. the original.
 
-### 📍 Try out our demo! [![Colab Demo](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1p3f5F3fIw9CD7H4RvfnHO9g-J45qUPHp?usp=sharing)
+## What this is for
 
-## Description
+If you want to deploy GeoCLIP as an inference-only HTTP service on a CPU box (e.g. inside Docker), or use it as a plain Python library (See **Library usage** below), this fork is for you.
 
-GeoCLIP addresses the challenges of worldwide image geo-localization by introducing a novel CLIP-inspired approach that aligns images with geographical locations, achieving state-of-the-art results on geo-localization and GPS to vector representation on benchmark datasets (Im2GPS3k, YFCC26k, GWS15k, and the Geo-Tagged NUS-Wide Dataset). Our location encoder models the Earth as a continuous function, learning semantically rich, CLIP-aligned features that are suitable for geo-localization. Additionally, our location encoder architecture generalizes, making it suitable for use as a pre-trained GPS encoder to aid geo-aware neural architectures.
+If you want to train GeoCLIP or use it as a general research toolkit, the upstream repo is still the right place.
 
-![ALT TEXT](/figures/method.png)
+## Setup
 
-## Method
+The fine-tuned GeoCLIP weights and the 100K-point GPS gallery are bundled in this repository. The only required setup step is downloading the CLIP vision tower:
 
-Similarly to OpenAI's CLIP, GeoCLIP is trained contrastively by matching Image-GPS pairs. By using the MP-16 dataset, composed of 4.7M Images taken across the globe, GeoCLIP learns distinctive visual features associated with different locations on earth.
-
-_🚧 Repo Under Construction 🔨_
-
-## 📎 Getting Started: API
-
-You can install GeoCLIP's module using pip:
-
-```
-pip install geoclip
+```bash
+pip install -r requirements.txt
+python reduce_clip_size.py # downloads openai/clip-vit-large-patch14, keeps vision tower only
 ```
 
-or directly from source:
+That's enough to run `/predict` or to use the library.
 
+For `/lookup` (reverse-geocoding a coordinate to region + country), drop a GeoPackage at `data/admin1_clean.gpkg`. Any admin-1 boundaries file with `name_en`, `admin`, and `iso_a2` columns works. A reasonable source:
+
+```bash
+# optional, only if you want /lookup
+wget -O /tmp/ne.zip https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_1_states_provinces.zip
+unzip /tmp/ne.zip -d /tmp/ne
+mkdir -p data
+python -c "import geopandas as g; \
+  df = g.read_file('/tmp/ne/ne_10m_admin_1_states_provinces.shp').rename(columns={'name': 'name_en'}); \
+  df = df[['name_en', 'admin', 'iso_a2', 'geometry']]; \
+  df.to_file('data/admin1_clean.gpkg', layer='regions', driver='GPKG')"
 ```
-git clone https://github.com/VicenteVivan/geo-clip
-cd geo-clip
-python setup.py install
-```
 
-## 🗺️📍 Worldwide Image Geolocalization
-
-![ALT TEXT](/figures/inference.png)
-
-### Usage: GeoCLIP Inference
+## Library usage
 
 ```python
-import torch
-from geoclip import GeoCLIP
+from fastgeoclip import FastGeoCLIP
 
-model = GeoCLIP()
+model = FastGeoCLIP() # k_neighbors defaults to 1000, index_type to flatl2
+model.eval()
 
-image_path = "image.png"
-
-top_pred_gps, top_pred_prob = model.predict(image_path, top_k=5)
-
-print("Top 5 GPS Predictions")
-print("=====================")
-for i in range(5):
-    lat, lon = top_pred_gps[i]
-    print(f"Prediction {i+1}: ({lat:.6f}, {lon:.6f})")
-    print(f"Probability: {top_pred_prob[i]:.6f}")
-    print("")
+gps, probs = model.predict("path/to/image.jpg", top_k=5)
+for (lat, lon), p in zip(gps.tolist(), probs.tolist()):
+    print(f"{lat:.4f}, {lon:.4f}  (p={p:.3f})")
 ```
 
-## 🌐 Worldwide GPS Embeddings
+First call writes embedding + FAISS caches next to the GPS gallery CSV (about a minute on a modern CPU). Subsequent calls reuse them. Set `CACHE_DIR` to relocate the caches (useful in containers with a persistent volume).
 
-In our paper, we show that once trained, our location encoder can assist other geo-aware neural architectures. Specifically, we explore our location encoder's ability to improve multi-class classification accuracy. We achieved state-of-the-art results on the Geo-Tagged NUS-Wide Dataset by concatenating GPS features from our pre-trained location encoder with an image's visual features. Additionally, we found that the GPS features learned by our location encoder, even without extra information, are effective for geo-aware image classification, achieving state-of-the-art performance in the GPS-only multi-class classification task on the same dataset.
+If your CLIP weights are not at the default `/app/clip/clip-vit-large-vision`, set `CLIP_MODEL_PATH=./clip/clip-vit-large-vision` before importing.
 
-![ALT TEXT](/figures/downstream-task.png)
+For batch inference, use `model.predict_batch([path1, path2, ...], top_k=5)` — encodes all images in one CLIP forward pass.
 
-### Usage: Pre-Trained Location Encoder
+## HTTP service
 
-```python
-import torch
-from geoclip import LocationEncoder
+### Endpoints
 
-gps_encoder = LocationEncoder()
+- `POST /predict` — form fields: `file` (image, ≤ 25 MB by default), `top_k` (1–100, default 5). Returns ranked predictions.
+- `POST /lookup` — body: `{"lat": ..., "lon": ...}`. Returns `{"region", "country", "iso_code"}`.
 
-gps_data = torch.Tensor([[40.7128, -74.0060], [34.0522, -118.2437]])  # NYC and LA in lat, lon
-gps_embeddings = gps_encoder(gps_data)
-print(gps_embeddings.shape) # (2, 512)
+### Run
+
+Make sure to run the Setup first to download the CLIP weights.
+
+```bash
+docker build -t fastgeoclip .
+docker run --rm -p 8000:8000 \
+  -v "$PWD/clip:/app/clip:ro" \
+  -v "$PWD/data:/app/data:ro" \
+  fastgeoclip
 ```
 
-## Acknowledgments
+See `docker-compose.example.yml` for a compose snippet with a persistent cache volume.
 
-This project incorporates code from Joshua M. Long's Random Fourier Features Pytorch. For the original source, visit [here](https://github.com/jmclong/random-fourier-features-pytorch).
+Locally:
+
+```bash
+CLIP_MODEL_PATH=./clip/clip-vit-large-vision DATA_GPKG=./data/admin1_clean.gpkg python app.py
+```
+
+Once it's up on `localhost:8000`, send a photo with curl:
+
+```bash
+curl -s -X POST http://localhost:8000/predict?top_k=3 \
+  -F "file=@/path/to/photo.jpg" | jq
+```
+
+Example response:
+
+```json
+{
+  "predictions": [
+    { "rank": 1, "latitude": 48.8741, "longitude":  2.2945, "probability": 0.334 },
+    { "rank": 2, "latitude": 48.8736, "longitude":  2.2942, "probability": 0.333 },
+    { "rank": 3, "latitude": 48.8747, "longitude":  2.2950, "probability": 0.333 }
+  ],
+  "processing_time_ms": 512.4
+}
+```
+
+Reverse-geocode the top prediction with `/lookup`:
+
+```bash
+curl -s -X POST http://localhost:8000/lookup \
+  -H 'Content-Type: application/json' \
+  -d '{"lat": 48.8741, "lon": 2.2945}' | jq
+# {"region": "Île-de-France", "country": "France", "iso_code": "FR"}
+```
+
+## Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `NUM_THREADS` | 4 | PyTorch CPU thread count |
+| `K_NEIGHBORS` | 1000 | FAISS candidate pool size — doesn't change top-1 accuracy; larger only slows you down |
+| `FAISS_INDEX_TYPE` | `flatl2` | `flatl2` (exact), `hnsw` or `ivf` (approximate, faster, slight accuracy hit) |
+| `MAX_UPLOAD_MB` | 25 | Hard cap on `/predict` upload size |
+| `CLIP_MODEL_PATH` | `/app/clip/clip-vit-large-vision` | Where the CLIP vision tower lives |
+| `CACHE_DIR` | `<package>/gps_gallery` | Where embedding + FAISS caches are written |
+| `DATA_GPKG` | `/app/data/admin1_clean.gpkg` | Path to reverse-geocoding GeoPackage |
+
+## Benchmarks
+
+### End-to-end speed
+
+Mean total latency on 10 random IM2GPS3K images (warmup excluded), 8-core Intel laptop, PyTorch 2.12, CPU-only:
+
+| Implementation | mean total latency | speedup |
+|---|---|---|
+| Upstream `geo-clip` | 5.9 s | 1× |
+| FastGeoCLIP — `flatl2` (default) | 0.50 s | 11.8× |
+| FastGeoCLIP — `ivf`              | 0.48 s | 12.3× |
+| FastGeoCLIP — `hnsw`             | 0.42 s | 13.9× |
+
+### Accuracy on IM2GPS3K (2997 images)
+
+Dataset: <https://www.kaggle.com/datasets/lctngdng/im2gps3k>. Top-1 GPS distance to ground truth, with end-to-end latency from the same hardware:
+
+| Implementation        | mean latency | @1 km | @25 km | @200 km | @750 km | @2500 km | median err | mean err |
+|-----------------------|-------------:|------:|-------:|--------:|--------:|---------:|-----------:|---------:|
+| Upstream `geo-clip`   |        5.9 s | 13.1% | 32.2%  | 48.1%   | 66.6%   | 82.3%    |   241 km   |  1764 km |
+| FastGeoCLIP — flatl2  |       0.50 s | 13.1% | 32.2%  | 48.1%   | 66.6%   | 82.3%    |   241 km   |  1764 km |
+| FastGeoCLIP — ivf     |       0.48 s | 12.0% | 29.8%  | 46.4%   | 66.0%   | 82.3%    |   271 km   |  1813 km |
+| FastGeoCLIP — hnsw    |       0.42 s | 12.0% | 30.3%  | 45.4%   | 63.8%   | 79.4%    |   296 km   |  1978 km |
+
+FastGeoCLIP with `flatl2` reproduces upstream's top-1 GPS on every one of 10 random images sampled with seed 42, so its accuracy across the full 2997-image set is identical to upstream's. `ivf` and `hnsw` use approximate nearest-neighbor search and trade ~1 pp of top-1 accuracy for a small additional speedup.
+
+K_NEIGHBORS sweeps (1000 → 100000) produced identical accuracy at every value within each index — the top-1 prediction doesn't depend on it. The default of 1000 is the smallest pool that gives full accuracy.
+
+### FAISS+rescoring step in isolation
+
+| Index / K          | per-query | notes |
+|--------------------|----------:|-------|
+| flatl2 / K=1000    |   12.7 ms | exact, fastest exact config |
+| hnsw / K=1000      |    0.4 ms | fastest overall |
+| ivf / K=1000       |    1.0 ms | between the two |
+
+The CLIP encoder (~680 ms) dominates total latency, so swapping to HNSW only saves ~12 ms (≈ 2%) at the cost of ~1.4 pp top-1 accuracy. Worth it only on much larger galleries or with a faster encoder.
+
+## Alternatives
+
+If you're researching other image geolocation models, I'd recommend looking at these other projects:
+
+- **[PLONK](https://github.com/nicolas-dufour/plonk)** - a more recent geolocation model designed for GPU inference. PLONK can be trained or fine-tuned on the public [OSV5Mdataset](https://huggingface.co/datasets/osv5m/osv5m-wds), which would also be a natural choice for further fine-tuning GeoCLIP itself on a larger, more recent set of geotagged images.
+- **[PIGEON](https://github.com/LukasHaas/PIGEON)** - a research codebase for training geo-localization models from scratch with alternative architectures. The trained weights are not open, but the code.
+- **[GeoEstimation](https://github.com/TIBHannover/GeoEstimation)** - a similar approach than PIGEON. Code and weights used to be public, but have been recently deleted.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Original copyright Vicente Vivanco (2024). See [NOTICE.md](NOTICE.md) for the full list of changes.
 
 ## Citation
 
-If you find GeoCLIP beneficial for your research, please consider citing us with the following BibTeX entry:
+If you use GeoCLIP (or this fork) in academic work, please cite the original paper:
 
-```
+```bibtex
 @inproceedings{geoclip,
   title={GeoCLIP: Clip-Inspired Alignment between Locations and Images for Effective Worldwide Geo-localization},
-  author={Vivanco, Vicente and Nayak, Gaurav Kumar and Shah, Mubarak},
+  author={Vivanco Cepeda, Vicente and Nayak, Gaurav Kumar and Shah, Mubarak},
   booktitle={Advances in Neural Information Processing Systems},
   year={2023}
+}
+```
+
+A reference to this fork is also appreciated if FastGeoCLIP's CPU inference path was useful for your work:
+
+```bibtex
+@software{fastgeoclip,
+  title  = {FastGeoCLIP: CPU-optimised inference fork of GeoCLIP},
+  author = {Barbero, Fabio},
+  year   = {2026},
+  url    = {https://github.com/fbarbe00/FastGeoClip}
 }
 ```
