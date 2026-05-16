@@ -17,7 +17,7 @@ If you want to train GeoCLIP or use it as a general research toolkit, the upstre
 The fine-tuned GeoCLIP weights and the 100K-point GPS gallery are bundled in this repository. The only required setup step is downloading the CLIP vision tower:
 
 ```bash
-pip install -r requirements.txt
+pip install huggingface_hub
 python reduce_clip_size.py # downloads openai/clip-vit-large-patch14, keeps vision tower only
 ```
 
